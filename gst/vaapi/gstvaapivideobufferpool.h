@@ -86,24 +86,6 @@ typedef enum
 } GstVaapiVideoBufferPoolOption;
 
 /**
- * GstVaapiVideoBufferPoolAcquireParams:
- * @proxy: the #GstVaapiSurfaceProxy associated to the dmabuf-base
- * memory
- *
- * Parameters passed to the gst_buffer_pool_acquire_buffer() function
- * on a #GstVaapiVideoBufferPool, to control the allocation of the
- * buffer.
- *
- * This is an extension of #GstBufferPoolAcquireParams
- */
-struct _GstVaapiVideoBufferPoolAcquireParams
-{
-  GstBufferPoolAcquireParams parent_instance;
-
-  GstVaapiSurfaceProxy *proxy;
-};
-
-/**
  * GstVaapiVideoBufferPool:
  *
  * A VA video buffer pool object.

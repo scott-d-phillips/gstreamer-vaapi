@@ -49,7 +49,6 @@ struct _GstVaapiVideoBufferPoolPrivate
   GstVideoInfo alloc_info;
   GstVaapiDisplay *display;
   guint options;
-  guint use_dmabuf_memory:1;
 };
 
 #define GST_VAAPI_VIDEO_BUFFER_POOL_GET_PRIVATE(obj) \
@@ -167,9 +166,7 @@ gst_vaapi_video_buffer_pool_set_config (GstBufferPool * pool,
 
   /* not our allocator, not our buffers */
   if (allocator) {
-    priv->use_dmabuf_memory = gst_vaapi_is_dmabuf_allocator (allocator);
-    if (priv->use_dmabuf_memory ||
-        g_strcmp0 (allocator->mem_type, GST_VAAPI_VIDEO_MEMORY_NAME) == 0) {
+    if (g_strcmp0 (allocator->mem_type, GST_VAAPI_VIDEO_MEMORY_NAME) == 0) {
       if (priv->allocator)
         gst_object_unref (priv->allocator);
       if ((priv->allocator = allocator))
@@ -213,7 +210,7 @@ gst_vaapi_video_buffer_pool_set_config (GstBufferPool * pool,
     gst_buffer_pool_config_set_video_alignment (config, &align);
   }
 
-  if (!priv->use_dmabuf_memory && gst_buffer_pool_config_has_option (config,
+  if (gst_buffer_pool_config_has_option (config,
           GST_BUFFER_POOL_OPTION_VIDEO_GL_TEXTURE_UPLOAD_META))
     priv->options |= GST_VAAPI_VIDEO_BUFFER_POOL_OPTION_GL_TEXTURE_UPLOAD;
 
@@ -267,8 +264,6 @@ gst_vaapi_video_buffer_pool_alloc_buffer (GstBufferPool * pool,
 {
   GstVaapiVideoBufferPoolPrivate *const priv =
       GST_VAAPI_VIDEO_BUFFER_POOL (pool)->priv;
-  GstVaapiVideoBufferPoolAcquireParams *const priv_params =
-      (GstVaapiVideoBufferPoolAcquireParams *) params;
   GstVaapiVideoMeta *meta;
   GstMemory *mem;
   GstBuffer *buffer;
@@ -292,13 +287,7 @@ gst_vaapi_video_buffer_pool_alloc_buffer (GstBufferPool * pool,
   if (!buffer)
     goto error_create_buffer;
 
-  if (priv_params && priv_params->proxy)
-    gst_vaapi_video_meta_set_surface_proxy (meta, priv_params->proxy);
-
-  if (priv->use_dmabuf_memory)
-    mem = gst_vaapi_dmabuf_memory_new (priv->allocator, meta);
-  else
-    mem = gst_vaapi_video_memory_new (priv->allocator, meta);
+  mem = gst_vaapi_video_memory_new (priv->allocator, meta);
   if (!mem)
     goto error_create_memory;
   gst_vaapi_video_meta_replace (&meta, NULL);
@@ -357,69 +346,16 @@ static GstFlowReturn
 gst_vaapi_video_buffer_pool_acquire_buffer (GstBufferPool * pool,
     GstBuffer ** out_buffer_ptr, GstBufferPoolAcquireParams * params)
 {
-  GstVaapiVideoBufferPoolPrivate *const priv =
-      GST_VAAPI_VIDEO_BUFFER_POOL (pool)->priv;
-  GstVaapiVideoBufferPoolAcquireParams *const priv_params =
-      (GstVaapiVideoBufferPoolAcquireParams *) params;
   GstFlowReturn ret;
   GstBuffer *buffer;
-  GstMemory *mem;
-  GstVaapiVideoMeta *meta;
-  GstVaapiSurface *surface;
-  GstVaapiBufferProxy *dmabuf_proxy;
 
   ret =
       GST_BUFFER_POOL_CLASS
       (gst_vaapi_video_buffer_pool_parent_class)->acquire_buffer (pool, &buffer,
       params);
 
-  if (!priv->use_dmabuf_memory || !params || !priv_params->proxy
-      || ret != GST_FLOW_OK) {
-    *out_buffer_ptr = buffer;
-    return ret;
-  }
-
-  /* The point of the following dance is to attach the right GstMemory to the
-   * current acquired buffer. Indeed this buffer can contain any of the
-   * GstFdmemory since this buffer have been popped out from the buffer pool's
-   * FIFO. So there is no garantee that this matches the current surface. The
-   * va decoder driver might not even use a FIFO. So there is no way to guess
-   * on the ordering. In short acquire_current_buffer on the va driver and on
-   * the buffer pool return none matching data. So we have to manually attach
-   * the right GstFdMemory to the acquired GstBuffer. The right GstMemory is
-   * the one associated with the current surface. */
-  g_assert (gst_buffer_n_memory (buffer) == 1);
-
-  /* Find the cached memory associated with the given surface. */
-  surface = GST_VAAPI_SURFACE_PROXY_SURFACE (priv_params->proxy);
-  dmabuf_proxy = gst_vaapi_surface_peek_buffer_proxy (surface);
-  if (dmabuf_proxy) {
-    mem = gst_vaapi_buffer_proxy_peek_mem (dmabuf_proxy);
-    if (mem == gst_buffer_peek_memory (buffer, 0))
-      mem = NULL;
-    else
-      mem = gst_memory_ref (mem);
-  } else {
-    /* The given surface has not been exported yet. */
-    meta = gst_buffer_get_vaapi_video_meta (buffer);
-    if (gst_vaapi_video_meta_get_surface_proxy (meta))
-      gst_vaapi_video_meta_set_surface_proxy (meta, priv_params->proxy);
-
-    mem =
-        gst_vaapi_dmabuf_memory_new (priv->allocator,
-        gst_buffer_get_vaapi_video_meta (buffer));
-  }
-
-  /* Attach the GstFdMemory to the output buffer. */
-  if (mem) {
-    GST_DEBUG_OBJECT (pool, "assigning memory %p to acquired buffer %p", mem,
-        buffer);
-    gst_buffer_replace_memory (buffer, 0, mem);
-    gst_buffer_unset_flags (buffer, GST_BUFFER_FLAG_TAG_MEMORY);
-  }
-
   *out_buffer_ptr = buffer;
-  return GST_FLOW_OK;
+  return ret;
 }
 
 static void

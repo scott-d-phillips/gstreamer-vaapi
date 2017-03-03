@@ -102,121 +102,6 @@ default_display_changed (GstVaapiPluginBase * plugin)
 {
 }
 
-static GstVaapiSurface *
-_get_cached_surface (GstBuffer * buf)
-{
-  return gst_mini_object_get_qdata (GST_MINI_OBJECT (buf),
-      g_quark_from_static_string ("GstVaapiDMABufSurface"));
-}
-
-static void
-_set_cached_surface (GstBuffer * buf, GstVaapiSurface * surface)
-{
-  return gst_mini_object_set_qdata (GST_MINI_OBJECT (buf),
-      g_quark_from_static_string ("GstVaapiDMABufSurface"), surface,
-      (GDestroyNotify) gst_vaapi_object_unref);
-}
-
-static gboolean
-plugin_update_sinkpad_info_from_buffer (GstVaapiPluginBase * plugin,
-    GstBuffer * buf)
-{
-  GstVideoInfo *const vip = &plugin->sinkpad_info;
-  GstVideoMeta *vmeta;
-  guint i;
-
-  vmeta = gst_buffer_get_video_meta (buf);
-  if (!vmeta)
-    return TRUE;
-
-  if (GST_VIDEO_INFO_FORMAT (vip) != vmeta->format ||
-      GST_VIDEO_INFO_WIDTH (vip) != vmeta->width ||
-      GST_VIDEO_INFO_HEIGHT (vip) != vmeta->height ||
-      GST_VIDEO_INFO_N_PLANES (vip) != vmeta->n_planes)
-    return FALSE;
-
-  for (i = 0; i < GST_VIDEO_INFO_N_PLANES (vip); ++i) {
-    GST_VIDEO_INFO_PLANE_OFFSET (vip, i) = vmeta->offset[i];
-    GST_VIDEO_INFO_PLANE_STRIDE (vip, i) = vmeta->stride[i];
-  }
-  GST_VIDEO_INFO_SIZE (vip) = gst_buffer_get_size (buf);
-  return TRUE;
-}
-
-static gboolean
-is_dma_buffer (GstBuffer * buf)
-{
-  GstMemory *mem;
-
-  if (gst_buffer_n_memory (buf) < 1)
-    return FALSE;
-
-  mem = gst_buffer_peek_memory (buf, 0);
-  if (!mem || !gst_is_dmabuf_memory (mem))
-    return FALSE;
-  return TRUE;
-}
-
-static gboolean
-plugin_bind_dma_to_vaapi_buffer (GstVaapiPluginBase * plugin,
-    GstBuffer * inbuf, GstBuffer * outbuf)
-{
-  GstVideoInfo *const vip = &plugin->sinkpad_info;
-  GstVaapiVideoMeta *meta;
-  GstVaapiSurface *surface;
-  GstVaapiSurfaceProxy *proxy;
-  gint fd;
-
-  fd = gst_dmabuf_memory_get_fd (gst_buffer_peek_memory (inbuf, 0));
-  if (fd < 0)
-    return FALSE;
-
-  if (!plugin_update_sinkpad_info_from_buffer (plugin, inbuf))
-    goto error_update_sinkpad_info;
-
-  meta = gst_buffer_get_vaapi_video_meta (outbuf);
-  g_return_val_if_fail (meta != NULL, FALSE);
-
-  /* Check for a VASurface cached in the buffer */
-  surface = _get_cached_surface (inbuf);
-  if (!surface) {
-    /* otherwise create one and cache it */
-    surface =
-        gst_vaapi_surface_new_with_dma_buf_handle (plugin->display, fd, vip);
-    if (!surface)
-      goto error_create_surface;
-    _set_cached_surface (inbuf, surface);
-  }
-
-  proxy = gst_vaapi_surface_proxy_new (surface);
-  if (!proxy)
-    goto error_create_proxy;
-  gst_vaapi_video_meta_set_surface_proxy (meta, proxy);
-  gst_vaapi_surface_proxy_unref (proxy);
-  gst_buffer_add_parent_buffer_meta (outbuf, inbuf);
-  return TRUE;
-
-  /* ERRORS */
-error_update_sinkpad_info:
-  {
-    GST_ERROR_OBJECT (plugin,
-        "failed to update sink pad video info from video meta");
-    return FALSE;
-  }
-error_create_surface:
-  {
-    GST_ERROR_OBJECT (plugin,
-        "failed to create VA surface from dma_buf handle");
-    return FALSE;
-  }
-error_create_proxy:
-  {
-    GST_ERROR_OBJECT (plugin,
-        "failed to create VA surface proxy from wrapped VA surface");
-    return FALSE;
-  }
-}
-
 static void
 plugin_reset_texture_map (GstVaapiPluginBase * plugin)
 {
@@ -395,68 +280,6 @@ gst_vaapi_plugin_base_ensure_display (GstVaapiPluginBase * plugin)
   return TRUE;
 }
 
-/* Checks whether the supplied pad peer element supports DMABUF sharing */
-/* XXX: this is a workaround to the absence of any proposer way to
-   specify DMABUF memory capsfeatures or bufferpool option to downstream */
-static gboolean
-has_dmabuf_capable_peer (GstVaapiPluginBase * plugin, GstPad * pad)
-{
-  GstPad *other_pad = NULL;
-  GstElement *element = NULL;
-  gchar *element_name = NULL;
-  gboolean is_dmabuf_capable = FALSE;
-  gint v;
-
-  gst_object_ref (pad);
-
-  for (;;) {
-    other_pad = gst_pad_get_peer (pad);
-    gst_object_unref (pad);
-    if (!other_pad)
-      break;
-
-    element = gst_pad_get_parent_element (other_pad);
-    gst_object_unref (other_pad);
-    if (!element)
-      break;
-
-    if (GST_IS_PUSH_SRC (element)) {
-      element_name = gst_element_get_name (element);
-      if (!element_name)
-        break;
-
-      if ((sscanf (element_name, "v4l2src%d", &v) != 1)
-          && (sscanf (element_name, "camerasrc%d", &v) != 1))
-        break;
-
-      v = 0;
-      g_object_get (element, "io-mode", &v, NULL);
-      if (strncmp (element_name, "camerasrc", 9) == 0)
-        is_dmabuf_capable = v == 3;
-      else
-        is_dmabuf_capable = v == 5;     /* "dmabuf-import" enum value */
-      break;
-    } else if (GST_IS_BASE_TRANSFORM (element)) {
-      element_name = gst_element_get_name (element);
-      if (!element_name || sscanf (element_name, "capsfilter%d", &v) != 1)
-        break;
-
-      pad = gst_element_get_static_pad (element, "sink");
-      if (!pad)
-        break;
-    } else
-      break;
-
-    g_free (element_name);
-    element_name = NULL;
-    g_clear_object (&element);
-  }
-
-  g_free (element_name);
-  g_clear_object (&element);
-  return is_dmabuf_capable;
-}
-
 static gboolean
 gst_vaapi_buffer_pool_caps_is_equal (GstBufferPool * pool, GstCaps * newcaps)
 {
@@ -506,13 +329,6 @@ ensure_sinkpad_allocator (GstVaapiPluginBase * plugin, GstCaps * caps,
   if (!reset_allocator (plugin->sinkpad_allocator, &vinfo))
     return TRUE;
 
-  if (has_dmabuf_capable_peer (plugin, plugin->sinkpad)) {
-    plugin->sinkpad_allocator =
-        gst_vaapi_dmabuf_allocator_new (plugin->display, &vinfo,
-        GST_VAAPI_SURFACE_ALLOC_FLAG_LINEAR_STORAGE, GST_PAD_SINK);
-    goto bail;
-  }
-
   /* enable direct upload if upstream requests raw video */
   if (gst_caps_is_video_raw (caps)) {
     usage_flag = GST_VAAPI_IMAGE_USAGE_FLAG_DIRECT_UPLOAD;
@@ -521,7 +337,6 @@ ensure_sinkpad_allocator (GstVaapiPluginBase * plugin, GstCaps * caps,
   plugin->sinkpad_allocator =
       gst_vaapi_video_allocator_new (plugin->display, &vinfo, 0, usage_flag);
 
-bail:
   if (!plugin->sinkpad_allocator)
     goto error_create_allocator;
   return TRUE;
@@ -537,26 +352,6 @@ error_create_allocator:
     GST_ERROR_OBJECT (plugin, "failed to create sink pad's allocator");
     return FALSE;
   }
-}
-
-static inline guint
-get_dmabuf_surface_allocation_flags (void)
-{
-  /* @FIXME: fetch the real devices ids */
-  /* Pair vendor/device identifies an unique physical device. */
-  guint va_vendor_id = 0x00;
-  guint va_device_id = 0x00;
-  guint gl_vendor_id = 0x00;
-  guint gl_device_id = 0x00;
-
-  /* Requires linear memory only if fd export is done on a different
-   * device than the device where the fd is imported. */
-  gboolean same_physical_device = va_vendor_id == gl_vendor_id
-      && va_device_id == gl_device_id;
-
-  if (same_physical_device)
-    return 0;
-  return GST_VAAPI_SURFACE_ALLOC_FLAG_LINEAR_STORAGE;
 }
 
 static gboolean
@@ -586,16 +381,8 @@ ensure_srcpad_allocator (GstVaapiPluginBase * plugin, GstVideoInfo * vinfo,
 
   plugin->srcpad_allocator = NULL;
   if (caps && gst_caps_is_video_raw (caps)) {
-    if (plugin->srcpad_can_dmabuf) {
-      if (GST_IS_VIDEO_DECODER (plugin) || GST_IS_BASE_TRANSFORM (plugin)) {
-        plugin->srcpad_allocator =
-            gst_vaapi_dmabuf_allocator_new (plugin->display, vinfo,
-            get_dmabuf_surface_allocation_flags (), GST_PAD_SRC);
-      }
-    } else {
-      usage_flag = GST_VAAPI_IMAGE_USAGE_FLAG_DIRECT_RENDER;
-      GST_INFO_OBJECT (plugin, "enabling direct rendering in source allocator");
-    }
+    usage_flag = GST_VAAPI_IMAGE_USAGE_FLAG_DIRECT_RENDER;
+    GST_INFO_OBJECT (plugin, "enabling direct rendering in source allocator");
   }
 
   if (!plugin->srcpad_allocator) {
@@ -1025,12 +812,6 @@ gst_vaapi_plugin_base_get_input_buffer (GstVaapiPluginBase * plugin,
           &outbuf, NULL) != GST_FLOW_OK)
     goto error_create_buffer;
 
-  if (is_dma_buffer (inbuf)) {
-    if (!plugin_bind_dma_to_vaapi_buffer (plugin, inbuf, outbuf))
-      goto error_bind_dma_buffer;
-    goto done;
-  }
-
   if (!gst_video_frame_map (&src_frame, &plugin->sinkpad_info, inbuf,
           GST_MAP_READ))
     goto error_map_src_buffer;
@@ -1045,7 +826,6 @@ gst_vaapi_plugin_base_get_input_buffer (GstVaapiPluginBase * plugin,
   if (!success)
     goto error_copy_buffer;
 
-done:
   gst_buffer_copy_into (outbuf, inbuf, GST_BUFFER_COPY_FLAGS |
       GST_BUFFER_COPY_TIMESTAMPS, 0, -1);
   *outbuf_ptr = outbuf;
@@ -1090,13 +870,6 @@ error_create_buffer:
         ("failed to create buffer"));
     return GST_FLOW_ERROR;
   }
-error_bind_dma_buffer:
-  {
-    GST_ELEMENT_ERROR (plugin, STREAM, FAILED, ("Allocation failed"),
-        ("failed to bind dma_buf to VA surface buffer"));
-    gst_buffer_unref (outbuf);
-    return GST_FLOW_ERROR;
-  }
 error_copy_buffer:
   {
     GST_WARNING_OBJECT (plugin, "failed to upload buffer to VA surface");
@@ -1135,12 +908,6 @@ gst_vaapi_plugin_base_set_gl_context (GstVaapiPluginBase * plugin,
       break;
 #endif
     case GST_GL_PLATFORM_EGL:
-#if VA_CHECK_VERSION (0,36,0) && USE_GST_GL_HELPERS
-      plugin->srcpad_can_dmabuf =
-          (!(gst_gl_context_get_gl_api (gl_context) & GST_GL_API_GLES1)
-          && gst_gl_context_check_feature (gl_context,
-              "EGL_EXT_image_dma_buf_import"));
-#endif
 #if USE_EGL
       display_type = GST_VAAPI_DISPLAY_TYPE_EGL;
       break;
