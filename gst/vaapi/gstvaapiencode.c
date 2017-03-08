@@ -616,6 +616,8 @@ gst_vaapiencode_handle_frame (GstVideoEncoder * venc,
   if (!proxy)
     goto error_buffer_no_surface_proxy;
 
+  gst_vaapi_surface_set_buffer_proxy (GST_VAAPI_SURFACE_PROXY_SURFACE (proxy),
+      NULL);
   gst_video_codec_frame_set_user_data (frame,
       gst_vaapi_surface_proxy_ref (proxy),
       (GDestroyNotify) gst_vaapi_surface_proxy_unref);

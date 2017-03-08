@@ -176,7 +176,7 @@ gst_vaapi_video_memory_sync (GstVaapiVideoMemory * mem);
  */
 struct _GstVaapiVideoAllocator
 {
-  GstAllocator parent_instance;
+  GstDmaBufAllocator parent_instance;
 
   /*< private >*/
   GstVideoInfo allocation_info;
@@ -194,7 +194,7 @@ struct _GstVaapiVideoAllocator
  */
 struct _GstVaapiVideoAllocatorClass
 {
-  GstAllocatorClass parent_class;
+  GstDmaBufAllocatorClass parent_class;
 };
 
 G_GNUC_INTERNAL

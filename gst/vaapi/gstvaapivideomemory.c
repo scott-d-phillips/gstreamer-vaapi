@@ -615,12 +615,40 @@ error_allocate_memory:
   }
 }
 
+static gint
+gst_vaapi_video_memory_get_fd (GstMemory * base_mem)
+{
+  GstVaapiVideoMemory *const mem = GST_VAAPI_VIDEO_MEMORY_CAST (base_mem);
+  GstVaapiBufferProxy *buffer = NULL;
+
+  if (use_native_formats (mem->usage_flag))
+    return -1;
+  if (!mem->proxy) {
+    mem->proxy =
+        gst_vaapi_surface_proxy_new (gst_vaapi_surface_new_full
+        (gst_vaapi_video_meta_get_display (mem->meta),
+            gst_allocator_get_vaapi_video_info (base_mem->allocator, NULL),
+            GST_VAAPI_SURFACE_ALLOC_FLAG_LINEAR_STORAGE));
+    gst_vaapi_video_meta_set_surface_proxy (mem->meta, mem->proxy);
+  }
+
+  if (!ensure_surface (mem))
+    return -1;
+  if (!(buffer = gst_vaapi_surface_peek_buffer_proxy (mem->surface))) {
+    buffer = gst_vaapi_surface_get_dma_buf_handle (mem->surface);
+    gst_vaapi_surface_set_buffer_proxy (mem->surface, buffer);
+    gst_vaapi_buffer_proxy_unref (buffer);
+  }
+
+  return gst_vaapi_buffer_proxy_get_handle (buffer);
+}
+
 /* ------------------------------------------------------------------------ */
 /* --- GstVaapiVideoAllocator                                           --- */
 /* ------------------------------------------------------------------------ */
 
 G_DEFINE_TYPE (GstVaapiVideoAllocator, gst_vaapi_video_allocator,
-    GST_TYPE_ALLOCATOR);
+    GST_TYPE_DMABUF_ALLOCATOR);
 
 static void
 gst_vaapi_video_allocator_free (GstAllocator * allocator, GstMemory * base_mem)
@@ -664,11 +692,13 @@ static void
 gst_vaapi_video_allocator_init (GstVaapiVideoAllocator * allocator)
 {
   GstAllocator *const base_allocator = GST_ALLOCATOR_CAST (allocator);
+  GstFdAllocator *const fd_allocator = GST_FD_ALLOCATOR_CAST (allocator);
 
   base_allocator->mem_type = GST_VAAPI_VIDEO_MEMORY_NAME;
   base_allocator->mem_map = gst_vaapi_video_memory_map;
   base_allocator->mem_unmap_full = gst_vaapi_video_memory_unmap_full;
   base_allocator->mem_copy = gst_vaapi_video_memory_copy;
+  fd_allocator->get_fd = gst_vaapi_video_memory_get_fd;
 
   GST_OBJECT_FLAG_SET (allocator, GST_ALLOCATOR_FLAG_CUSTOM_ALLOC);
 }
